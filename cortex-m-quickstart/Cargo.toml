@@ -32,10 +32,12 @@ version = "0.5.0"
 
 [dependencies]
 panic-semihosting = "0.6.0"
-
+l3gd20 = { path = "../../../l3gd20/l3gd20/"}
+lsm303dlhc = { path = "../../../lsm303dlhc/"}
 cortex-m = "0.7.6"
 cortex-m-rt = "0.7.2"
-l3gd20 = "0.3.0"
+movavg = { version = "2", default-features = false }
+l298n = "0.2.0"
 
 # Panic behaviour, see https://crates.io/keywords/panic-impl for alternatives
 panic-halt = "0.2.0"

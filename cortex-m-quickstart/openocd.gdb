@@ -32,5 +32,7 @@ set style sources off
 #Set a BP at HardFault
 # break HardFault
 
+monitor reset
+
 #Continue running until hitting main
 continue
