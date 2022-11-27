@@ -12,15 +12,18 @@ use hal::gpio::{AF5, Output, Edge, PushPull, OpenDrain, Input, PE1, PE3, PE10, P
                 PE4, PB6, PB7, AF4};
 use hal::spi::{Spi};
 use hal::i2c::{I2c};
-use hal::pac::{SPI1,I2C1};
+use hal::pac::{SPI1,I2C1, TIM2};
 use hal::prelude::*;
 use hal::pwm::{PwmChannel, WithPins, Tim3Ch1, Tim3Ch4, tim3};
+use hal::timer::{Timer, Event};
 use systick_monotonic::{fugit::Duration, Systick}; //used for timers
 use l3gd20::{L3gd20, Odr, Scale, I2Mode,FIFOToggle, FIFOMode};
 use lsm303dlhc::{Lsm303dlhc, AccelOdr, Sensitivity, I1ModeA, FIFOToggleA, FIFOModeA};
 use movavg::MovAvg;
 use l298n::L298N;
-
+use embedded_time::duration::*;
+use drogue_embedded_timer::{MillisecondsClock1, MillisecondsTicker1};
+// use embedded_time::Instant;
 // defines the watermark level and buff size when reading from the l3gd20
 // reducing the size will help with responsiveness of the gyro
 // but will create more interrupts and increase error
@@ -30,13 +33,25 @@ use l298n::L298N;
 const GYRO_WTM: usize = 6;
 const ACC_WTM: usize = 6;
 
+static CLOCK: MillisecondsClock1 = MillisecondsClock1::new();
 
-#[rtic::app(device = stm32f3xx_hal::pac, peripherals = true, dispatchers = [SPI1])]
+#[rtic::app(device = stm32f3xx_hal::pac, peripherals = true, dispatchers = [SPI2, SPI3])]
 mod app {
     use super::*;
 
     #[shared]
-    struct Shared {}
+    struct Shared {
+        gyro_read: bool,
+        accel_read: bool,
+
+        gyro_values: I32x3,
+        accel_values: I32x3,
+        ticker: MillisecondsTicker1
+                    <'static, MillisecondsClock1,
+                    Timer<TIM2>,
+                    fn(&mut Timer<TIM2>)>,
+
+    }
 
     #[local]
     struct Local {
@@ -71,7 +86,7 @@ mod app {
     }
 
     #[monotonic(binds = SysTick, default = true)] //?
-    type MonoTimer = Systick<5000>;  //Systick<TIMER_HZ> 1000 hz, 1ms ganularity
+    type MonoTimer = Systick<1000>;  //Systick<TIMER_HZ> 1000 hz, 1ms ganularity
     //Actual rate of the timer is combionation of syslck and TIMER_HZ
     //TIMER_HZ is a settable rate
     //monotic has a binds = InterruptName
@@ -90,7 +105,9 @@ mod app {
         let mut exti = cx.device.EXTI;  // Configuring for interrupt use
 
         // this initializes the monotonic
-        let mono = Systick::new(cx.core.SYST, 36_000_000); //?
+        let mono = Systick::new(cx.core.SYST, 36_000_000); // setup mono to use SYSTICK
+
+        
         // monotonics are scheduled in #[init]
         // must be returned in the init::Monotics(...) tuple, see later
         // the tulple ativates the monotics
@@ -103,6 +120,15 @@ mod app {
             .pclk1(36.MHz())
             .freeze(&mut flash.acr);
 
+        // Setting up timer for embedded clock
+        let mut tim2 = Timer::new(cx.device.TIM2, clocks, &mut rcc.apb1);
+        tim2.enable_interrupt(Event::Update); 
+        tim2.start(1.milliseconds());
+
+        let ticker = CLOCK.ticker(tim2, (|t| { t.clear_event(Event::Update);}) as fn(&mut Timer<TIM2>));
+
+        // creating a new timer
+        // let eq_timer = embedded_time::clock::Clock()
 
         // splitting out used ports
         // Configuration Ports so far:
@@ -222,33 +248,47 @@ mod app {
         // <T, const NOM: u32, const DENUM: u32> duration in seconds:
         // NOM / DENOM * ticks
         // 
-        blink::spawn_after(Duration::<u64, 1, 5000>::from_ticks(1000)).unwrap();
+        // blink::spawn_after(Duration::<u64, 1, 5000>::from_ticks(1000)).unwrap();
         //spawn_after must use rtic_monotonic::Monotonic trait
         //Some timer that handls timing of the system
+
+        // Consider using another implementation where you just spawn the
+        // Sensor fusion function after a certain time
+
         
         rprintln!("Leaving init");
 
-        
-        let accel = lsm303dlhc_driver.accel_fifo::<{ACC_WTM*6+1},ACC_WTM>().unwrap();
 
-        for i in 0..ACC_WTM {
+        // rprintln!("current time: {}", (&test_clock.try_now().unwrap()).elapsed_since());
+        let gyro_values = I32x3 {x: 0, y: 0, z:0 };
+        let accel_values = I32x3 {x: 0, y: 0, z:0 };
 
-            rprintln!("accel val    x: {}", accel.i16x3buf[i].x);
-        };
+        // let now = mono.now();
 
-        (Shared {},
+        (Shared {ticker, gyro_read: false, accel_read:false, gyro_values, accel_values},
          Local {led, l3gd20_driver, motor_driver, l3gd20_int2, lsm303dlhc_driver, lsm303dlhc_int1, state: 0},
-         init::Monotonics(mono),
+         init::Monotonics(mono)
         )
 
+    }
 
 
-
+    // timer interrupt, clear interrupt and adds to ticker
+    #[task(binds = TIM2, shared = [ticker], priority = 3)]
+    fn ticker(mut cx: ticker::Context){
+        (cx.shared.ticker).lock(|ticker|{
+            ticker.tick();
+        });
+        let current_time = embedded_time::clock::Clock::try_now(&CLOCK).unwrap().duration_since_epoch();
+        let ms: Milliseconds<u64> = current_time.try_into().unwrap();
+        rprintln!("T: Current time: {} ms", ms);
     }
 
     // tasks uses the locals led & state
     #[task(local = [led, motor_driver, state])]
     fn blink(cx: blink::Context) {
+        rprintln!("Entering blink");
+
 
         cx.local.motor_driver.a.set_duty(300);
         cx.local.motor_driver.b.set_duty(305);
@@ -264,7 +304,7 @@ mod app {
 
             rprintln!("Running forward");
 
-            blink::spawn_after(Duration::<u64, 1, 5000>::from_ticks(950)).unwrap();
+            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(950)).unwrap();
             
         } else if *cx.local.state == 1 {
             cx.local.motor_driver.a.set_duty(1024);
@@ -277,7 +317,7 @@ mod app {
             *cx.local.state = 2;
 
             rprintln!("Braking");
-            blink::spawn_after(Duration::<u64, 1, 5000>::from_ticks(7000)).unwrap();
+            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(7000)).unwrap();
         }
         else if *cx.local.state == 2{
 
@@ -287,7 +327,7 @@ mod app {
 
             *cx.local.state = 3;
             rprintln!("Running foward");
-            blink::spawn_after(Duration::<u64, 1, 5000>::from_ticks(950)).unwrap();
+            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(950)).unwrap();
 
         } else if *cx.local.state == 3{
             cx.local.motor_driver.a.set_duty(1024);
@@ -300,16 +340,15 @@ mod app {
             *cx.local.state = 0;
             rprintln!("Braking");
 
-            blink::spawn_after(Duration::<u64, 1, 5000>::from_ticks(7000)).unwrap();
+            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(7000)).unwrap();
         }
 
     }
 
-
-
-    #[task(binds = EXTI4, local = [lsm303dlhc_driver, lsm303dlhc_int1])]
+    #[task(binds = EXTI4, local = [lsm303dlhc_driver, lsm303dlhc_int1], shared = [accel_values, accel_read, gyro_read])]
     fn on_lsm303dlhc (cx: on_lsm303dlhc::Context){
 
+        // rprintln!("Entering on_lsm303dlhc");
         let accel_fifo = cx.local.lsm303dlhc_driver.accel_fifo::<{ACC_WTM*6+1},ACC_WTM>().unwrap();
 
         let mut avg_x: MovAvg<i32, i32, ACC_WTM> = MovAvg::new();
@@ -322,18 +361,26 @@ mod app {
             avg_z.feed(accel_fifo.i16x3buf[i].z as i32);
         }
 
-        rprintln!("gyro val     x: {},   y: {},   z: {}", 
-            avg_x.get(),
-            avg_y.get(),
-            avg_z.get(),);
+        (cx.shared.accel_values, cx.shared.gyro_read, cx.shared.accel_read).lock(|accel_values, gyro_read, accel_read|{
+            accel_values.x = avg_x.get();
+            accel_values.y = avg_y.get();
+            accel_values.z = avg_z.get();
+            *accel_read = true;
 
+            if (*gyro_read == true) && (*accel_read == true) {
+                // will spawn after the completion of this function
+                // since they both have the same priority
+                sensor_fusion::spawn().unwrap();  
+            }
+        });
 
         cx.local.lsm303dlhc_int1.clear_interrupt();
     }
 
      // Gyroscope L3GD20 Interrupt Handler
-     #[task(binds = EXTI1, local = [l3gd20_driver, l3gd20_int2])]
+     #[task(binds = EXTI1, local = [l3gd20_driver, l3gd20_int2], shared = [gyro_values, accel_read, gyro_read])]
      fn on_l3gd20(cx: on_l3gd20::Context) {
+        // rprintln!("G: Entering on_l3gd20");
 
         // ROWS sets up the watermark level for the buffer
         // grabs 16 values from the buffer and averages them out
@@ -344,22 +391,60 @@ mod app {
         // consider look into a faster avg. method
         // - Another toml option is available for faster averaging in this library
         // look into if necessary
-        let mut avg_x: MovAvg<i16, i16, GYRO_WTM> = MovAvg::new();
-        let mut avg_y: MovAvg<i16, i16, GYRO_WTM> = MovAvg::new();
-        let mut avg_z: MovAvg<i16, i16, GYRO_WTM> = MovAvg::new();
+        let mut avg_x: MovAvg<i32, i32, GYRO_WTM> = MovAvg::new();
+        let mut avg_y: MovAvg<i32, i32, GYRO_WTM> = MovAvg::new();
+        let mut avg_z: MovAvg<i32, i32, GYRO_WTM> = MovAvg::new();
 
         for i in 0..GYRO_WTM {
-            avg_x.feed(gyro_fifo.i16x3buf[i].x);
-            avg_y.feed(gyro_fifo.i16x3buf[i].y);
-            avg_z.feed(gyro_fifo.i16x3buf[i].z);
+            avg_x.feed(gyro_fifo.i16x3buf[i].x as i32);
+            avg_y.feed(gyro_fifo.i16x3buf[i].y as i32);
+            avg_z.feed(gyro_fifo.i16x3buf[i].z as i32);
         }
-        rprintln!("gyro val     x: {},   y: {},   z: {}", 
-            avg_x.get(),
-            avg_y.get(),
-            avg_z.get(),);
 
+        (cx.shared.gyro_values, cx.shared.gyro_read, cx.shared.accel_read).lock(|gyro_values, gyro_read, accel_read|{
+            gyro_values.x = avg_x.get();
+            gyro_values.y = avg_y.get();
+            gyro_values.z = avg_z.get();
+            *gyro_read = true;
+
+            if (*gyro_read == true) && (*accel_read == true) {
+                sensor_fusion::spawn().unwrap();
+            }
+        });
+        
         cx.local.l3gd20_int2.clear_interrupt();
      }
 
 
+     #[task(shared = [gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
+     fn sensor_fusion(cx: sensor_fusion::Context){
+
+        (cx.shared.gyro_values, cx.shared.accel_values, cx.shared.gyro_read, cx.shared.accel_read)
+            .lock(|gyro_values, accel_values, gyro_read, accel_read|{
+                // rprintln!("AG: starting to set locked values, gyro_read");
+                
+                *gyro_read = false;
+               //  rprintln!("AG: starting to set false accel_read");
+
+                *accel_read = false;
+              //  rprintln!("AG: reading values xyz");
+                
+                rprintln!("AG: Gyro Values: x: {} y: {} z: {}, Accel Values: x: {} y: {} z: {}",
+                            gyro_values.x, gyro_values.y, gyro_values.z, accel_values.x, accel_values.y, accel_values.z);
+                // rprintln!("AG: ***** end of cycle *****");
+        });
+
+     }
+
+}
+
+/// XYZ triple
+#[derive(Debug, Clone, Copy)]
+pub struct I32x3 {
+    /// X component
+    pub x: i32,
+    /// Y component
+    pub y: i32,
+    /// Z component
+    pub z: i32,
 }
