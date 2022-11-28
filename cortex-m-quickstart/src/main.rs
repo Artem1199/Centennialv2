@@ -22,7 +22,10 @@ use lsm303dlhc::{Lsm303dlhc, AccelOdr, Sensitivity, I1ModeA, FIFOToggleA, FIFOMo
 use movavg::MovAvg;
 use l298n::L298N;
 use embedded_time::duration::*;
+use embedded_time::Instant;
+use embedded_time::clock::Clock;
 use drogue_embedded_timer::{MillisecondsClock1, MillisecondsTicker1};
+use dcmimu::DCMIMU;
 // use embedded_time::Instant;
 // defines the watermark level and buff size when reading from the l3gd20
 // reducing the size will help with responsiveness of the gyro
@@ -30,8 +33,9 @@ use drogue_embedded_timer::{MillisecondsClock1, MillisecondsTicker1};
 // (max value = 31), not sure why 32 does not work; look into in the future
 // TODO: setting the gyro to read at 780hz and having a 16+ row size; can result in
 // the averaging function to overflow; need to use larger units
-const GYRO_WTM: usize = 6;
-const ACC_WTM: usize = 6;
+// Todo: at lower values e.g. 3, robot will hang up
+const GYRO_WTM: usize = 8;
+const ACC_WTM: usize = 8;
 
 static CLOCK: MillisecondsClock1 = MillisecondsClock1::new();
 
@@ -50,6 +54,7 @@ mod app {
                     <'static, MillisecondsClock1,
                     Timer<TIM2>,
                     fn(&mut Timer<TIM2>)>,
+        last_instant: Instant<MillisecondsClock1>,
 
     }
 
@@ -82,6 +87,8 @@ mod app {
                           PwmChannel<Tim3Ch1, WithPins>,
                           PwmChannel<Tim3Ch4, WithPins>
                           >,
+        // sensor fusion settings:
+        dcmimu_driver: DCMIMU,
 
     }
 
@@ -105,7 +112,7 @@ mod app {
         let mut exti = cx.device.EXTI;  // Configuring for interrupt use
 
         // this initializes the monotonic
-        let mono = Systick::new(cx.core.SYST, 36_000_000); // setup mono to use SYSTICK
+        let mono = Systick::new(cx.core.SYST, 46_000_000); // setup mono to use SYSTICK
 
         
         // monotonics are scheduled in #[init]
@@ -125,7 +132,7 @@ mod app {
         tim2.enable_interrupt(Event::Update); 
         tim2.start(1.milliseconds());
 
-        let ticker = CLOCK.ticker(tim2, (|t| { t.clear_event(Event::Update);}) as fn(&mut Timer<TIM2>));
+        let mut ticker = CLOCK.ticker(tim2, (|t| { t.clear_event(Event::Update);}) as fn(&mut Timer<TIM2>));
 
         // creating a new timer
         // let eq_timer = embedded_time::clock::Clock()
@@ -154,7 +161,7 @@ mod app {
         let spi_pa7 = gpioa.pa7.into_af_push_pull::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
         let spi_cs_pe3 = gpioe.pe3.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
 
-        let l3d20_spi = Spi::new(cx.device.SPI1, (spi_pa5, spi_pa6, spi_pa7), 1.MHz(), clocks, &mut rcc.apb2);  // using clock from before
+        let l3d20_spi = Spi::new(cx.device.SPI1, (spi_pa5, spi_pa6, spi_pa7), 4.MHz(), clocks, &mut rcc.apb2);  // using clock from before
         // also noticed that freqquency can be up to 3.Mhz and Clock can also be set faster; look into this for improvements
 
         let mut l3gd20_int2 = gpioe.pe1.into_pull_down_input(&mut gpioe.moder, &mut gpioe.pupdr);
@@ -166,7 +173,7 @@ mod app {
 
         // -- l3GD20 Register Configuration
         l3gd20_driver.set_odr(Odr::Hz380).unwrap();
-        l3gd20_driver.set_scale(Scale::Dps2000).unwrap();  //Todo: setup a print to verify these values after they are set
+        l3gd20_driver.set_scale(Scale::Dps250).unwrap();  //Todo: setup a print to verify these values after they are set
         l3gd20_driver.set_fifo_mode(FIFOMode::Stream).unwrap();
         l3gd20_driver.set_wtm_tr(GYRO_WTM).unwrap();
         l3gd20_driver.set_int2_mode(I2Mode::I2_WTM).unwrap();
@@ -231,18 +238,14 @@ mod app {
 
         // ****** End of Motor configuration ****** //
 
+        // ----- Start of Sensor Fusion Config ----- //
+        let dcmimu_driver = DCMIMU::new();
+        // tick the clock at least once to get it started before "try_now"
+        ticker.tick();
+        let last_instant = Clock::try_now(&CLOCK).unwrap();
 
-        if l3gd20_int2.is_interrupt_pending()  {
-            rprintln!("Interrupt pending on L3GD20 int2 pin!");
-        } else {
-            rprintln!("Interrupt not pending on L3GD20 int2");
-        }
+        // ****** End of Sensor Fusion Config ****** //
 
-        if lsm303dlhc_int1.is_interrupt_pending()  {
-            rprintln!("Interrupt pending on LSM303DLHC int1 pin!");
-        } else {
-            rprintln!("Interrupt not pending on LSM303DLHC int1");
-        }
 
         // schedule blink to run after:
         // <T, const NOM: u32, const DENUM: u32> duration in seconds:
@@ -265,8 +268,8 @@ mod app {
 
         // let now = mono.now();
 
-        (Shared {ticker, gyro_read: false, accel_read:false, gyro_values, accel_values},
-         Local {led, l3gd20_driver, motor_driver, l3gd20_int2, lsm303dlhc_driver, lsm303dlhc_int1, state: 0},
+        (Shared {ticker, last_instant, gyro_read: false, accel_read:false, gyro_values, accel_values},
+         Local {led, l3gd20_driver, motor_driver, l3gd20_int2, lsm303dlhc_driver, lsm303dlhc_int1, dcmimu_driver, state: 0},
          init::Monotonics(mono)
         )
 
@@ -279,9 +282,6 @@ mod app {
         (cx.shared.ticker).lock(|ticker|{
             ticker.tick();
         });
-        let current_time = embedded_time::clock::Clock::try_now(&CLOCK).unwrap().duration_since_epoch();
-        let ms: Milliseconds<u64> = current_time.try_into().unwrap();
-        rprintln!("T: Current time: {} ms", ms);
     }
 
     // tasks uses the locals led & state
@@ -416,8 +416,30 @@ mod app {
      }
 
 
-     #[task(shared = [gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
-     fn sensor_fusion(cx: sensor_fusion::Context){
+     #[task(local = [dcmimu_driver], shared = [last_instant, gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
+     fn sensor_fusion(mut cx: sensor_fusion::Context){
+        
+        // create temp time difference var
+        let mut time_diff:Milliseconds<u64> = Milliseconds(0);
+
+        // lock to read &CLOCK to get differences since last occurance
+        (cx.shared.last_instant).lock(|last_instant|{
+            // get the current time as an Instant
+            let current_instant = Clock::try_now(&CLOCK).unwrap();
+            //convert current time Instant to a duratiion (difference between current and last instant)
+            let dur = current_instant.checked_duration_since(&last_instant).unwrap();
+            // convert to Millisecond type
+            time_diff = dur.try_into().unwrap();
+            // replace old instant with new instant
+            *last_instant = current_instant;
+        });
+
+
+        // converts duration to a generic, then a u32, then an f32
+        let time_diff_f32 = embedded_time::duration::Duration::to_generic::<u32>(time_diff, Fraction::new(1, 1000)).unwrap().integer() as f32;
+
+        // rprintln!("Time difference: {}", time_diff_f32);
+
 
         (cx.shared.gyro_values, cx.shared.accel_values, cx.shared.gyro_read, cx.shared.accel_read)
             .lock(|gyro_values, accel_values, gyro_read, accel_read|{
@@ -428,9 +450,48 @@ mod app {
 
                 *accel_read = false;
               //  rprintln!("AG: reading values xyz");
-                
-                rprintln!("AG: Gyro Values: x: {} y: {} z: {}, Accel Values: x: {} y: {} z: {}",
-                            gyro_values.x, gyro_values.y, gyro_values.z, accel_values.x, accel_values.y, accel_values.z);
+              let accel_gravity = 0.000574;
+              let ax = accel_gravity * (accel_values.y as f32);
+              let ay = accel_gravity * (accel_values.x as f32);
+              let az = accel_gravity * (accel_values.z as f32);
+
+
+              // still has a ton of issues, if you hold the bot in air
+                // error will slowly add up
+                // try calibration method described in paper
+              let gyro_degrees = 0.00875;
+              let gx = -1. * gyro_degrees * (gyro_values.x as f32) * (3.1416 / 180.) + 0.003;
+              let gy = -1. * gyro_degrees * (gyro_values.y as f32) * (3.1416 / 180.) - 0.008;
+              let gz = gyro_degrees * (gyro_values.z as f32) * (3.1416 / 180.) - 0.017;
+
+                let (dcm, _gyb) = cx.local.dcmimu_driver.update(
+                    (
+                        // 0.0,
+                        // 0.0,
+                        // 0.0,),
+                    gx, // Roll
+                    gy, // yaw
+                    gz,       // Pitch
+                    ),
+                    (
+                        // 0.0,
+                        // 16000.0,
+                        // 0.0,),
+
+                    ax,
+                    ay,
+                    az,),  // pitch
+                    (time_diff_f32)*0.001);
+
+                //  rprintln!("AG: Time: Gyro Values: x: {} y: {} z: {}, Accel Values:" 
+                //  // x: {} y: {} z: {}
+                //  ,
+                //             // time_diff_f32, gx, gy, gz, 
+                //            ax, ay, az
+                //         );
+                            //     rprintln!("AG: Time: {} Accel Values: x: {} y: {} z: {}",
+                            //  time_diff_f32, accel_values.x, accel_values.y, accel_values.z);
+                rprintln!("AG: Time: {} Roll: {}    Yaw: {}    Pitch: {}   ", time_diff_f32, dcm.roll, dcm.yaw, dcm.pitch);
                 // rprintln!("AG: ***** end of cycle *****");
         });
 
