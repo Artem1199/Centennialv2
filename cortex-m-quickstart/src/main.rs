@@ -30,7 +30,7 @@ use embedded_time::duration::*;
 use embedded_time::Instant;
 use embedded_time::clock::Clock;
 use drogue_embedded_timer::{MillisecondsClock1, MillisecondsTicker1};
-use dcmimu::DCMIMU;
+// use dcmimu::DCMIMU;
 // use embedded_time::Instant;
 // defines the watermark level and buff size when reading from the l3gd20
 // reducing the size will help with responsiveness of the gyro
@@ -106,7 +106,7 @@ mod app {
                           PwmChannel<Tim3Ch4, WithPins>
                           >,
         // sensor fusion settings:
-        dcmimu_driver: DCMIMU,
+        // dcmimu_driver: DCMIMU,
 
     }
 
@@ -288,7 +288,7 @@ mod app {
 
 
         // ----- Start of Sensor Fusion Config ----- //
-        let dcmimu_driver = DCMIMU::new();
+        // let dcmimu_driver = DCMIMU::new();
         // tick the clock at least once to get it started before "try_now"
         ticker.tick();
         let last_instant = Clock::try_now(&CLOCK).unwrap();
@@ -319,7 +319,7 @@ mod app {
         // let now = mono.now();
         let send =  Some(TxTransfer::Idle(cx.local.dma_tx_buf, dma1_tx, USART2_tx));
         (Shared {send, ticker, last_instant, gyro_read: false, accel_read:false, gyro_values, accel_values},
-         Local {led, l3gd20_driver, motor_driver, l3gd20_int2, lsm303dlhc_driver, lsm303dlhc_int1, dcmimu_driver, state: 0},
+         Local {led, l3gd20_driver, motor_driver, l3gd20_int2, lsm303dlhc_driver, lsm303dlhc_int1, state: 0},
          init::Monotonics(mono)
         )
 
@@ -359,14 +359,14 @@ mod app {
             avg_z.feed(accel_fifo.i16x3buf[i].z as i32);
         }
 
-        rprintln!("from fifo: {}", accel_fifo.i16x3buf[2].x);
+        // rprintln!("from fifo: {}", accel_fifo.i16x3buf[2].x);
         (cx.shared.accel_values, cx.shared.gyro_read, cx.shared.accel_read).lock(|accel_values, gyro_read, accel_read|{
             accel_values.x = avg_x.get();
             accel_values.y = avg_y.get();
             accel_values.z = avg_z.get();
             *accel_read = true;
 
-            rprintln!("accel x: {}", avg_x.get());
+            // rprintln!("accel x: {}", avg_x.get());
         cx.local.lsm303dlhc_int1.clear_interrupt();
 
 
@@ -446,7 +446,7 @@ mod app {
 
 
 
-     #[task(local = [dcmimu_driver], shared = [last_instant, gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
+     #[task(local = [], shared = [last_instant, gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
      fn sensor_fusion(mut cx: sensor_fusion::Context){
         
         // create temp time difference var
@@ -493,19 +493,19 @@ mod app {
               let gy = -1. * gyro_degrees * (gyro_values.y as f32) * (3.1416 / 180.) - 0.008;
               let gz = gyro_degrees * (gyro_values.z as f32) * (3.1416 / 180.) - 0.017;
 
-                let (_dcm, _gyb) = cx.local.dcmimu_driver.update(
-                    (
-                    gx, // Roll
-                    gy, // yaw
-                    gz,       // Pitch
-                    ),
-                    (
-                    ax,
-                    ay,
-                    az,),  // pitch
-                    (time_diff_f32)*0.001);
+                // let (_dcm, _gyb) = cx.local.dcmimu_driver.update(
+                //     (
+                //     gx, // Roll
+                //     gy, // yaw
+                //     gz,       // Pitch
+                //     ),
+                //     (
+                //     ax,
+                //     ay,
+                //     az,),  // pitch
+                //     (time_diff_f32)*0.001);
 
-                //  rprintln!("AG: Time: {} Gyro Values: x: {} y: {} z: {}, Accel Values: x: {} y: {} z: {}", time_diff_f32, gx, gy, gz, ax, ay, az);
+                 rprintln!("AG: Time: {} Gyro Values: x: {} y: {} z: {}, Accel Values: x: {} y: {} z: {}", time_diff_f32, gx, gy, gz, ax, ay, az);
                 // rprintln!("AG: Time: {} Roll: {}    Yaw: {}    Pitch: {}   ", time_diff_f32, dcm.roll, dcm.yaw, dcm.pitch);
                 // rprintln!("AG: ***** end of cycle *****");
         });
