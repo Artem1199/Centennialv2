@@ -26,6 +26,8 @@ lto = true
 codegen-units = 1
 debug = true
 resolver = "2"
+opt-level = "z"
+strip = true
 
 [dependencies.cortex-m-semihosting]
 version = "0.5.0"
@@ -55,5 +57,4 @@ drogue-embedded-timer = { path = "../../../drogue-embedded-timer/"}
 # cmsis_dsp = { version = "0.1.0", features = ["micromath"] }
 mono-clock = "0.1.1"
 embedded-hal = "0.2.7"
-nb = "1.0.0"
-void = { version = "1.0.2", default-features = false }
+

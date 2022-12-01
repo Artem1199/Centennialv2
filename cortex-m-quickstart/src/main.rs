@@ -180,7 +180,7 @@ mod app {
         let spi_pa7 = gpioa.pa7.into_af_push_pull::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
         let spi_cs_pe3 = gpioe.pe3.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
 
-        let l3d20_spi = Spi::new(cx.device.SPI1, (spi_pa5, spi_pa6, spi_pa7), 4.MHz(), clocks, &mut rcc.apb2);  // using clock from before
+        let l3d20_spi = Spi::new(cx.device.SPI1, (spi_pa5, spi_pa6, spi_pa7), 1.MHz(), clocks, &mut rcc.apb2);  // using clock from before
         // also noticed that freqquency can be up to 3.Mhz and Clock can also be set faster; look into this for improvements
 
 
@@ -336,62 +336,10 @@ mod app {
 
     // tasks uses the locals led & state
     #[task(local = [led, motor_driver, state])]
-    fn blink(cx: blink::Context) {
+    fn blink(_cx: blink::Context) {
         rprintln!("Entering blink");
 
-
-        cx.local.motor_driver.a.set_duty(300);
-        cx.local.motor_driver.b.set_duty(305);
-        
-
-        if *cx.local.state == 0 {  //if local state (note deference)
-            
-            cx.local.led.set_high().unwrap();  // the the LED HIGH
-            cx.local.motor_driver.a.forward();
-            cx.local.motor_driver.b.forward();
-
-            *cx.local.state = 1;
-
-            rprintln!("Running forward");
-
-            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(950)).unwrap();
-            
-        } else if *cx.local.state == 1 {
-            cx.local.motor_driver.a.set_duty(1024);
-            cx.local.motor_driver.b.set_duty(1024);
-
-            cx.local.led.set_low().unwrap(); //set low
-            cx.local.motor_driver.a.stop();
-            cx.local.motor_driver.b.stop();
-
-            *cx.local.state = 2;
-
-            rprintln!("Braking");
             blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(7000)).unwrap();
-        }
-        else if *cx.local.state == 2{
-
-            cx.local.led.set_low().unwrap(); //set low
-            cx.local.motor_driver.a.forward();
-            cx.local.motor_driver.b.forward();
-
-            *cx.local.state = 3;
-            rprintln!("Running foward");
-            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(950)).unwrap();
-
-        } else if *cx.local.state == 3{
-            cx.local.motor_driver.a.set_duty(1024);
-            cx.local.motor_driver.b.set_duty(1024);
-
-            cx.local.led.set_low().unwrap(); //set low
-            cx.local.motor_driver.a.stop();
-            cx.local.motor_driver.b.stop();
-
-            *cx.local.state = 0;
-            rprintln!("Braking");
-
-            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(7000)).unwrap();
-        }
 
     }
 
