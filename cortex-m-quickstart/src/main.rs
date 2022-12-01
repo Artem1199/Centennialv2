@@ -130,7 +130,7 @@ mod app {
         let mut exti = cx.device.EXTI;  // Configuring for interrupt use
 
         // this initializes the monotonic
-        let mono = Systick::new(cx.core.SYST, 46_000_000); // setup mono to use SYSTICK
+        let mono = Systick::new(cx.core.SYST, 36_000_000); // setup mono to use SYSTICK
 
         
         // monotonics are scheduled in #[init]
@@ -169,7 +169,6 @@ mod app {
             .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
         led.set_high().unwrap();
 
-        rprintln!("Past LED setup1");
 
         // ****** Start of Gyroscope configuration ****** //
 
@@ -181,11 +180,10 @@ mod app {
         let spi_pa7 = gpioa.pa7.into_af_push_pull::<5>(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrl);
         let spi_cs_pe3 = gpioe.pe3.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
 
-        let l3d20_spi = Spi::new(cx.device.SPI1, (spi_pa5, spi_pa6, spi_pa7), 4.MHz(), clocks, &mut rcc.apb2);  // using clock from before
+        let l3d20_spi = Spi::new(cx.device.SPI1, (spi_pa5, spi_pa6, spi_pa7), 1.MHz(), clocks, &mut rcc.apb2);  // using clock from before
         // also noticed that freqquency can be up to 3.Mhz and Clock can also be set faster; look into this for improvements
 
 
-        rprintln!("Past LED setup2");
 
         let mut l3gd20_int2 = gpioe.pe1.into_pull_down_input(&mut gpioe.moder, &mut gpioe.pupdr);
         syscfg.select_exti_interrupt_source(&l3gd20_int2);
@@ -194,7 +192,6 @@ mod app {
         l3gd20_int2.trigger_on_edge(&mut exti, Edge::Rising);
         let mut l3gd20_driver = L3gd20::new(l3d20_spi, spi_cs_pe3).unwrap();
 
-        rprintln!("Past LED setup3");
 
         // -- l3GD20 Register Configuration
         l3gd20_driver.set_odr(Odr::Hz380).unwrap();
@@ -206,7 +203,6 @@ mod app {
         l3gd20_driver.set_fifo_toggle(FIFOToggle::FIFO_EN).unwrap();
         // ****** End of gyroscope configuration ****** //
 
-        rprintln!("Past LED setup4");
 
 
         // ****** Start of Accelerometer configuration ****** //
@@ -217,26 +213,15 @@ mod app {
         lsm303dlhc_int1.enable_interrupt(&mut exti);
         lsm303dlhc_int1.trigger_on_edge(&mut exti, Edge::Rising);
 
-        rprintln!("Past LED setup5");
-
-
         // -- LSM303DLHC Driver Setup
         let i2c1_pb6 = gpiob.pb6.into_af_open_drain::<4>(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrl);
         let i2c1_pb7 = gpiob.pb7.into_af_open_drain::<4>(&mut gpiob.moder, &mut gpiob.otyper, &mut gpiob.afrl);
         let lsm303dlhc_i2c = I2c::new(cx.device.I2C1, (i2c1_pb6, i2c1_pb7), 400000.Hz(), clocks, &mut rcc.apb1);
         let mut lsm303dlhc_driver = Lsm303dlhc::new(lsm303dlhc_i2c).unwrap();
 
-        rprintln!("Past LED setup6");
-
-
         // -- LSM303DLHC Register Configuration
         lsm303dlhc_driver.accel_odr(AccelOdr::Hz400).unwrap();
-        rprintln!("Past LED setup6");
-
         lsm303dlhc_driver.set_accel_sensitivity(Sensitivity::G1).unwrap();
-
-        rprintln!("Past LED setup7");
-
 
         // ** LSM303DLHC reset sequence, from: https://github.com/SealHAT/LSM303/blob/master/LSM303AGR.c **//
         const WTM_RESET: usize = 0;
@@ -248,7 +233,6 @@ mod app {
         lsm303dlhc_driver.set_accel_int1_mode(I1ModeA::I1_WTM).unwrap();
         
         // ****** End of Accelerometer configuration ****** //
-        rprintln!("Past LED setup 8");
 
         // ----- Start Motor Configurations ----- //
         let motora_pb12 = gpiob.pb12.into_push_pull_output(&mut gpiob.moder, &mut gpiob.otyper);
@@ -352,62 +336,10 @@ mod app {
 
     // tasks uses the locals led & state
     #[task(local = [led, motor_driver, state])]
-    fn blink(cx: blink::Context) {
+    fn blink(_cx: blink::Context) {
         rprintln!("Entering blink");
 
-
-        cx.local.motor_driver.a.set_duty(300);
-        cx.local.motor_driver.b.set_duty(305);
-        
-
-        if *cx.local.state == 0 {  //if local state (note deference)
-            
-            cx.local.led.set_high().unwrap();  // the the LED HIGH
-            cx.local.motor_driver.a.forward();
-            cx.local.motor_driver.b.forward();
-
-            *cx.local.state = 1;
-
-            rprintln!("Running forward");
-
-            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(950)).unwrap();
-            
-        } else if *cx.local.state == 1 {
-            cx.local.motor_driver.a.set_duty(1024);
-            cx.local.motor_driver.b.set_duty(1024);
-
-            cx.local.led.set_low().unwrap(); //set low
-            cx.local.motor_driver.a.stop();
-            cx.local.motor_driver.b.stop();
-
-            *cx.local.state = 2;
-
-            rprintln!("Braking");
             blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(7000)).unwrap();
-        }
-        else if *cx.local.state == 2{
-
-            cx.local.led.set_low().unwrap(); //set low
-            cx.local.motor_driver.a.forward();
-            cx.local.motor_driver.b.forward();
-
-            *cx.local.state = 3;
-            rprintln!("Running foward");
-            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(950)).unwrap();
-
-        } else if *cx.local.state == 3{
-            cx.local.motor_driver.a.set_duty(1024);
-            cx.local.motor_driver.b.set_duty(1024);
-
-            cx.local.led.set_low().unwrap(); //set low
-            cx.local.motor_driver.a.stop();
-            cx.local.motor_driver.b.stop();
-
-            *cx.local.state = 0;
-            rprintln!("Braking");
-
-            blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(7000)).unwrap();
-        }
 
     }
 
@@ -427,20 +359,24 @@ mod app {
             avg_z.feed(accel_fifo.i16x3buf[i].z as i32);
         }
 
+        rprintln!("from fifo: {}", accel_fifo.i16x3buf[2].x);
         (cx.shared.accel_values, cx.shared.gyro_read, cx.shared.accel_read).lock(|accel_values, gyro_read, accel_read|{
             accel_values.x = avg_x.get();
             accel_values.y = avg_y.get();
             accel_values.z = avg_z.get();
             *accel_read = true;
 
+            rprintln!("accel x: {}", avg_x.get());
+        cx.local.lsm303dlhc_int1.clear_interrupt();
+
+
             if (*gyro_read == true) && (*accel_read == true) {
                 // will spawn after the completion of this function
                 // since they both have the same priority
-                dma_send::spawn().unwrap();  
+                sensor_fusion::spawn().unwrap();  
             }
         });
 
-        cx.local.lsm303dlhc_int1.clear_interrupt();
     }
 
      // Gyroscope L3GD20 Interrupt Handler
@@ -473,16 +409,18 @@ mod app {
             gyro_values.z = avg_z.get();
             *gyro_read = true;
 
+        cx.local.l3gd20_int2.clear_interrupt();
+
+
             if (*gyro_read == true) && (*accel_read == true) {
-                dma_send::spawn().unwrap();
+                sensor_fusion::spawn().unwrap();
             }
         });
         
-        cx.local.l3gd20_int2.clear_interrupt();
      }
 
 
-     #[task(shared = [send, gyro_values, accel_values], priority = 2)]
+     #[task(shared = [send, gyro_values, accel_values])]
      fn dma_send(cx: dma_send::Context){
         let send = cx.shared.send;
         let (tx_buf, tx_channel, tx) = match send.take().unwrap(){
@@ -492,11 +430,9 @@ mod app {
         let data: [u8; 12] = *b"Hello DMAsss";
         tx_buf.copy_from_slice(&data[..]);
         send.replace(TxTransfer::Running(tx.write_all(tx_buf, tx_channel)));
-
-        sensor_fusion::spawn().unwrap();
      }
 
-     #[task(binds = DMA1_CH7, shared = [send], priority = 2)]  //TODO: Fix priority
+     #[task(binds = DMA1_CH7, shared = [send])]
     fn on_tx(ctx: on_tx::Context) {
         let send = ctx.shared.send;
         let (tx_buf, mut tx_channel, tx) = match send.take().unwrap() {
@@ -543,10 +479,10 @@ mod app {
 
                 *accel_read = false;
               //  rprintln!("AG: reading values xyz");
-              let accel_gravity = 0.000574;
-              let ax = accel_gravity * (accel_values.y as f32);
-              let ay = accel_gravity * (accel_values.x as f32);
-              let az = accel_gravity * (accel_values.z as f32);
+              let accel_gravity = 0.00059848449; // 9.80557 Local grav, 16384 (accel converstion)
+              let ax = (accel_gravity as f32) * (accel_values.y as f32);
+              let ay = (accel_gravity as f32) * (accel_values.x as f32);
+              let az = (accel_gravity as f32) * (accel_values.z as f32);
 
 
               // still has a ton of issues, if you hold the bot in air
@@ -557,36 +493,24 @@ mod app {
               let gy = -1. * gyro_degrees * (gyro_values.y as f32) * (3.1416 / 180.) - 0.008;
               let gz = gyro_degrees * (gyro_values.z as f32) * (3.1416 / 180.) - 0.017;
 
-                let (dcm, _gyb) = cx.local.dcmimu_driver.update(
+                let (_dcm, _gyb) = cx.local.dcmimu_driver.update(
                     (
-                        // 0.0,
-                        // 0.0,
-                        // 0.0,),
                     gx, // Roll
                     gy, // yaw
                     gz,       // Pitch
                     ),
                     (
-                        // 0.0,
-                        // 16000.0,
-                        // 0.0,),
-
                     ax,
                     ay,
                     az,),  // pitch
                     (time_diff_f32)*0.001);
 
-                //  rprintln!("AG: Time: Gyro Values: x: {} y: {} z: {}, Accel Values:" 
-                //  // x: {} y: {} z: {}
-                //  ,
-                //             // time_diff_f32, gx, gy, gz, 
-                //            ax, ay, az
-                //         );
-                            //     rprintln!("AG: Time: {} Accel Values: x: {} y: {} z: {}",
-                            //  time_diff_f32, accel_values.x, accel_values.y, accel_values.z);
-                rprintln!("AG: Time: {} Roll: {}    Yaw: {}    Pitch: {}   ", time_diff_f32, dcm.roll, dcm.yaw, dcm.pitch);
+                //  rprintln!("AG: Time: {} Gyro Values: x: {} y: {} z: {}, Accel Values: x: {} y: {} z: {}", time_diff_f32, gx, gy, gz, ax, ay, az);
+                // rprintln!("AG: Time: {} Roll: {}    Yaw: {}    Pitch: {}   ", time_diff_f32, dcm.roll, dcm.yaw, dcm.pitch);
                 // rprintln!("AG: ***** end of cycle *****");
         });
+
+        dma_send::spawn().unwrap();
 
      }
 
