@@ -18,18 +18,18 @@ use hal::prelude::*;
 use hal::pwm::{PwmChannel, WithPins, Tim3Ch1, Tim3Ch4, tim3};
 use hal::serial::{Serial, Tx,};
 use hal::dma::{dma1::{C7}, Channel, Transfer};
-use hal::dma;
+use hal::{dma, timer};
 use hal::timer::Timer;
-use hal::timer;
 use systick_monotonic::{fugit::Duration, Systick}; //used for timers
 use l3gd20::{L3gd20, Odr, Scale, I2Mode,FIFOToggle, FIFOMode};
 use lsm303dlhc::{Lsm303dlhc, AccelOdr, Sensitivity, I1ModeA, FIFOToggleA, FIFOModeA};
 use movavg::MovAvg;
 use l298n::L298N;
-use embedded_time::duration::*;
+use embedded_time::duration::{Milliseconds, Fraction};
 use embedded_time::Instant;
 use embedded_time::clock::Clock;
 use drogue_embedded_timer::{MillisecondsClock1, MillisecondsTicker1};
+use cobs_rs;
 // use dcmimu::DCMIMU;
 // use embedded_time::Instant;
 // defines the watermark level and buff size when reading from the l3gd20
@@ -52,7 +52,7 @@ mod app {
     //Buffer size for USART2/BLE transfer
     // DMA/USART2 reference: https://github.com/kalkyl/f303-rtic/blob/main/src/bin/serial.rs
 
-    const BUF_SIZE: usize = 12;
+    const BUF_SIZE: usize = 30;
     pub enum TxTransfer{
         Running(Transfer<&'static mut [u8; BUF_SIZE], C7, Tx<USART2, PD5<AF7<PushPull>>>>),
         Idle(&'static mut [u8; BUF_SIZE], C7, Tx<USART2, PD5<AF7<PushPull>>>),
@@ -195,7 +195,7 @@ mod app {
 
         // -- l3GD20 Register Configuration
         l3gd20_driver.set_odr(Odr::Hz380).unwrap();
-        l3gd20_driver.set_scale(Scale::Dps250).unwrap();  //Todo: setup a print to verify these values after they are set
+        l3gd20_driver.set_scale(Scale::Dps500).unwrap();  //Todo: setup a print to verify these values after they are set
         l3gd20_driver.set_fifo_mode(FIFOMode::Stream).unwrap();
         l3gd20_driver.set_wtm_tr(GYRO_WTM).unwrap();
         l3gd20_driver.set_int2_mode(I2Mode::I2_WTM).unwrap();
@@ -421,14 +421,54 @@ mod app {
 
 
      #[task(shared = [send, gyro_values, accel_values])]
-     fn dma_send(cx: dma_send::Context){
+     fn dma_send(cx: dma_send::Context, time_diff: i16, go: I16x3, ao: I16x3 ){
         let send = cx.shared.send;
         let (tx_buf, tx_channel, tx) = match send.take().unwrap(){
             TxTransfer::Idle(buf, ch, tx) => (buf, ch, tx),
             TxTransfer::Running(transfer) => transfer.wait(),
         };
-        let data: [u8; 12] = *b"Hello DMAsss";
-        tx_buf.copy_from_slice(&data[..]);
+
+        const TEMP_SIZE: usize = BUF_SIZE - 2;
+        let mut data: [u8; TEMP_SIZE] = [1; TEMP_SIZE];
+
+        // Todo: See if building this array is a processing impact
+        // can move the text part of the array outside of this
+        // Allowing it be built only once
+        // Simply delete this, send 0s, and compare average time
+        data[0] = b"T"[0];
+        data[1] = b"I"[0];
+        data[2] = time_diff.to_be_bytes()[0];
+        data[3] = time_diff.to_be_bytes()[1];
+        data[4] = b"G"[0];
+        data[5] = b"X"[0];
+        data[6] = go.x.to_be_bytes()[0];
+        data[7] = go.x.to_be_bytes()[1];
+        data[8] = b"G"[0];
+        data[9] = b"Y"[0];
+        data[10] = go.y.to_be_bytes()[0];
+        data[11] = go.y.to_be_bytes()[1];
+        data[12] = b"G"[0];
+        data[13] = b"Z"[0];
+        data[14] = go.z.to_be_bytes()[0];
+        data[15] = go.z.to_be_bytes()[1];
+        data[16] = b"A"[0];
+        data[17] = b"X"[0];
+        data[18] = ao.x.to_be_bytes()[0];
+        data[19] = go.x.to_be_bytes()[1];
+        data[20] = b"A"[0];
+        data[21] = b"Y"[0];
+        data[22] = ao.y.to_be_bytes()[0];
+        data[23] = ao.y.to_be_bytes()[1];
+        data[24] = b"A"[0];
+        data[25] = b"Z"[0];
+        data[26] = ao.z.to_be_bytes()[0];
+        data[27] = ao.z.to_be_bytes()[1];
+        
+        let encoded: [u8; BUF_SIZE] = cobs_rs::stuff(data, 0x00);
+
+        rprintln!("{}", time_diff);
+
+        tx_buf.copy_from_slice(&encoded[..]);
         send.replace(TxTransfer::Running(tx.write_all(tx_buf, tx_channel)));
      }
 
@@ -443,8 +483,6 @@ mod app {
         send.replace(TxTransfer::Idle(tx_buf, tx_channel, tx));
         
     }
-
-
 
      #[task(local = [], shared = [last_instant, gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
      fn sensor_fusion(mut cx: sensor_fusion::Context){
@@ -464,53 +502,45 @@ mod app {
             *last_instant = current_instant;
         });
 
-
         // converts duration to a generic, then a u32, then an f32
-        let time_diff_f32 = embedded_time::duration::Duration::to_generic::<u32>(time_diff, Fraction::new(1, 1000)).unwrap().integer() as f32;
-
+        let time_diff_i16: i16 = embedded_time::duration::Duration::to_generic::<u32>(time_diff, Fraction::new(1, 1000)).unwrap().integer() as i16;
+        let _time_diff_f32 = time_diff_i16 as f32;
         // rprintln!("Time difference: {}", time_diff_f32);
+
+        let mut ao = I16x3 {x: 0, y: 0, z: 0};
+        let mut go = I16x3 {x: 0, y: 0, z: 0};
 
         (cx.shared.gyro_values, cx.shared.accel_values, cx.shared.gyro_read, cx.shared.accel_read)
             .lock(|gyro_values, accel_values, gyro_read, accel_read|{
-                // rprintln!("AG: starting to set locked values, gyro_read");
-                
+
                 *gyro_read = false;
-               //  rprintln!("AG: starting to set false accel_read");
-
                 *accel_read = false;
-              //  rprintln!("AG: reading values xyz");
-              let accel_gravity = 0.00059848449; // 9.80557 Local grav, 16384 (accel converstion)
-              let ax = (accel_gravity as f32) * (accel_values.y as f32);
-              let ay = (accel_gravity as f32) * (accel_values.x as f32);
-              let az = (accel_gravity as f32) * (accel_values.z as f32);
+
+              let accel_gravity:f32 = 0.00059848449; // 9.80557 Local grav, 16384 (accel converstion)
+              let gyro_degrees:f32 = 0.0175;
+
+              let mut af = F32x3 {x: 0., y: 0., z: 0.};
+              let mut gf = F32x3 {x: 0., y: 0., z: 0.};
+              af.x = (accel_gravity) * (accel_values.y as f32);
+              af.y = (accel_gravity) * (accel_values.x as f32);
+              af.z = (accel_gravity) * (accel_values.z as f32);
+
+              gf.x = -1. * gyro_degrees * (gyro_values.x as f32) * (3.141592 / 180.);
+              gf.y = -1. * gyro_degrees * (gyro_values.y as f32) * (3.141592 / 180.);
+              gf.z = gyro_degrees * (gyro_values.z as f32) * (3.141592 / 180.);
+
+                //  rprintln!("AG: Time: {} Gyro Values: {}, Accel Values: {}", time_diff_f32, gyro_final, accel_final);
+                ao.x = accel_values.x as i16;
+                ao.y = accel_values.y as i16;
+                ao.z = accel_values.z as i16;
+                go.x = gyro_values.x as i16;
+                go.y = gyro_values.y as i16;
+                go.z = gyro_values.z as i16;
 
 
-              // still has a ton of issues, if you hold the bot in air
-                // error will slowly add up
-                // try calibration method described in paper
-              let gyro_degrees = 0.00875;
-              let gx = -1. * gyro_degrees * (gyro_values.x as f32) * (3.1416 / 180.) + 0.003;
-              let gy = -1. * gyro_degrees * (gyro_values.y as f32) * (3.1416 / 180.) - 0.008;
-              let gz = gyro_degrees * (gyro_values.z as f32) * (3.1416 / 180.) - 0.017;
-
-                // let (_dcm, _gyb) = cx.local.dcmimu_driver.update(
-                //     (
-                //     gx, // Roll
-                //     gy, // yaw
-                //     gz,       // Pitch
-                //     ),
-                //     (
-                //     ax,
-                //     ay,
-                //     az,),  // pitch
-                //     (time_diff_f32)*0.001);
-
-                 rprintln!("AG: Time: {} Gyro Values: x: {} y: {} z: {}, Accel Values: x: {} y: {} z: {}", time_diff_f32, gx, gy, gz, ax, ay, az);
-                // rprintln!("AG: Time: {} Roll: {}    Yaw: {}    Pitch: {}   ", time_diff_f32, dcm.roll, dcm.yaw, dcm.pitch);
-                // rprintln!("AG: ***** end of cycle *****");
         });
 
-        dma_send::spawn().unwrap();
+        dma_send::spawn(time_diff_i16, go, ao).unwrap();
 
      }
 
@@ -525,4 +555,22 @@ pub struct I32x3 {
     pub y: i32,
     /// Z component
     pub z: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct I16x3 {
+    /// X component
+    pub x: i16,
+    /// Y component
+    pub y: i16,
+    /// Z component
+    pub z: i16,
+}
+pub struct F32x3 {
+    /// X component
+    pub x: f32,
+    /// Y component
+    pub y: f32,
+    /// Z component
+    pub z: f32,
 }
