@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
-data = pd.read_csv("C:\\Users\\Artem\\Desktop\\CalAttempt1.csv", header = 0, index_col=0)
+data = pd.read_csv("C:\\Users\\Artem\\Desktop\\results.csv", header = 0, index_col=0)
 data.head()
 
 regions, section_list = ferraris_regions_from_interactive_plot(data)

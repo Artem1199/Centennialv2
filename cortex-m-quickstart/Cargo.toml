@@ -56,3 +56,4 @@ mono-clock = "0.1.1"
 embedded-hal = "0.2.7"
 nb = "1.0.0"
 void = { version = "1.0.2", default-features = false }
+nalgebra = { version = "0.31.4", default-features = false, features = ["libm"]}

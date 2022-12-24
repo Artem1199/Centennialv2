@@ -30,7 +30,8 @@ use embedded_time::Instant;
 use embedded_time::clock::Clock;
 use drogue_embedded_timer::{MillisecondsClock1, MillisecondsTicker1};
 use cobs_rs;
-// use dcmimu::DCMIMU;
+use nalgebra::{Matrix3, Matrix3x1};
+use dcmimu::DCMIMU;
 // use embedded_time::Instant;
 // defines the watermark level and buff size when reading from the l3gd20
 // reducing the size will help with responsiveness of the gyro
@@ -43,6 +44,63 @@ const GYRO_WTM: usize = 8;
 const ACC_WTM: usize = 8;
 
 static CLOCK: MillisecondsClock1 = MillisecondsClock1::new();
+
+const ACC_GRA:f32 = 0.00059848449; // 9.80557 Local grav, 16384 (accel converstion)
+const GYR_CON:f32 = 0.0175; // 8.75E-3 for DSP250, 17.5E-3 for DSP500
+
+const B_A: Matrix3x1<f32> = Matrix3x1::new(
+    -0.06018732343590668,
+    0.09045269971808807,
+    0.18455407204801322
+);
+
+const INV_K_A: Matrix3<f32> =  Matrix3::new(
+    1.02430537, 0.0,         0.0,       
+    0.0,         0.99771133, 0.0,        
+    0.0,         0.0,         0.98006634
+);
+
+const INV_R_A: Matrix3<f32> = Matrix3::new(
+     0.01031599, -1.00009238, -0.00398154,
+    -1.00004742,  0.00278359, -0.00322246,
+     0.00296282,  0.00056055,  1.0000164 
+);
+
+const INV_K_G: Matrix3<f32> = Matrix3::new(
+    1.03181465, 0.0,         0.0,       
+    0.0,         1.00367252, 0.0,        
+    0.0,         0.0,         1.02928775
+
+);
+
+const K_GA: Matrix3<f32> = Matrix3::new(
+    
+        0.0010841498085428513,
+        -0.0036068758966438267,
+        0.0016940004822989106,
+        -0.0006921637377395656,
+        0.001782155486780773,
+        9.959878836458618e-05,
+        -0.000582200954912589,
+        0.0015527180988631096,
+        0.00027412851975773674
+    
+
+);
+
+const INV_R_G: Matrix3<f32> = Matrix3::new(
+    -1.00030251,  0.01795299,  0.00973464,
+     0.00664456,  0.99961048, -0.01423917,
+    -0.02142715,  0.02795872,  1.00043112,
+
+);
+
+const B_G: Matrix3x1<f32> = Matrix3x1::new(
+    -0.9490751065923255,
+    -0.29021646441456217,
+    1.51969908166612
+
+);
 
 
 #[rtic::app(device = stm32f3xx_hal::pac, peripherals = true, dispatchers = [SPI2, SPI3])]
@@ -106,7 +164,7 @@ mod app {
                           PwmChannel<Tim3Ch4, WithPins>
                           >,
         // sensor fusion settings:
-        // dcmimu_driver: DCMIMU,
+        dcmimu_driver: DCMIMU,
 
     }
 
@@ -132,11 +190,9 @@ mod app {
         // this initializes the monotonic
         let mono = Systick::new(cx.core.SYST, 36_000_000); // setup mono to use SYSTICK
 
-        
         // monotonics are scheduled in #[init]
         // must be returned in the init::Monotics(...) tuple, see later
         // the tulple ativates the monotics
-
 
         let clocks = rcc
             .cfgr
@@ -163,7 +219,6 @@ mod app {
         let mut gpioe = cx.device.GPIOE.split(&mut rcc.ahb);
         let mut gpiod = cx.device.GPIOD.split(&mut rcc.ahb);
 
-
         let mut led = gpioe
             .pe10
             .into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
@@ -183,15 +238,12 @@ mod app {
         let l3d20_spi = Spi::new(cx.device.SPI1, (spi_pa5, spi_pa6, spi_pa7), 1.MHz(), clocks, &mut rcc.apb2);  // using clock from before
         // also noticed that freqquency can be up to 3.Mhz and Clock can also be set faster; look into this for improvements
 
-
-
         let mut l3gd20_int2 = gpioe.pe1.into_pull_down_input(&mut gpioe.moder, &mut gpioe.pupdr);
         syscfg.select_exti_interrupt_source(&l3gd20_int2);
 
         l3gd20_int2.enable_interrupt(&mut exti);
         l3gd20_int2.trigger_on_edge(&mut exti, Edge::Rising);
         let mut l3gd20_driver = L3gd20::new(l3d20_spi, spi_cs_pe3).unwrap();
-
 
         // -- l3GD20 Register Configuration
         l3gd20_driver.set_odr(Odr::Hz380).unwrap();
@@ -202,8 +254,6 @@ mod app {
 
         l3gd20_driver.set_fifo_toggle(FIFOToggle::FIFO_EN).unwrap();
         // ****** End of gyroscope configuration ****** //
-
-
 
         // ****** Start of Accelerometer configuration ****** //
 
@@ -223,7 +273,7 @@ mod app {
         lsm303dlhc_driver.accel_odr(AccelOdr::Hz400).unwrap();
         lsm303dlhc_driver.set_accel_sensitivity(Sensitivity::G1).unwrap();
 
-        // ** LSM303DLHC reset sequence, from: https://github.com/SealHAT/LSM303/blob/master/LSM303AGR.c **//
+        // -- LSM303DLHC reset sequence, from: https://github.com/SealHAT/LSM303/blob/master/LSM303AGR.c 
         const WTM_RESET: usize = 0;
         lsm303dlhc_driver.set_accel_fifo_mode(FIFOModeA::Bypass).unwrap();  // Clear FIFO
         lsm303dlhc_driver.set_accel_wtm_tr(WTM_RESET).unwrap();  // Set WTM to 0 to reset any WTM interrupts
@@ -268,34 +318,21 @@ mod app {
         let USART2_serial = Serial::new(cx.device.USART2,(usart_pd5_tx,usart_pd6_rx), 230400.Bd() ,clocks, &mut rcc.apb1);
         let (USART2_tx, _USART2_rx) = USART2_serial.split();
         let dma1 = cx.device.DMA1.split(&mut rcc.ahb);
-        // let (dma1_tx, dma1_rx) = (dma1.ch7, dma1.ch6);
         let mut dma1_tx = dma1.ch7;
         let _dma1_rx = dma1.ch6;
 
-        // the data we are going to send over serial
-        // let tx_buf = singleton!(: [u8; 9] = *b"hello DMA").unwrap();
-        // the buffer we are going to receive the transmitted data in
-        // let rx_buf = singleton!(: [u8; 9] = [0; 9]).unwrap();
-
-        // let sending = usart2_tx.write_all(tx_buf, dma1_tx);
-        // let _receiving = usart2_rx.read_exact(rx_buf, dma1_rx);
-
-        // let (_tx_buf, mut dma1_tx, _usart2_tx) = sending.wait();
         dma1_tx.clear_event(dma::Event::TransferComplete);
         dma1_tx.enable_interrupt(dma::Event::TransferComplete);
 
         // ****** End of USART/BLE Configuration ****** //
 
-
         // ----- Start of Sensor Fusion Config ----- //
-        // let dcmimu_driver = DCMIMU::new();
+        let dcmimu_driver = DCMIMU::new();
         // tick the clock at least once to get it started before "try_now"
         ticker.tick();
         let last_instant = Clock::try_now(&CLOCK).unwrap();
 
         // ****** End of Sensor Fusion Config ****** //
-
-
 
         // schedule blink to run after:
         // <T, const NOM: u32, const DENUM: u32> duration in seconds:
@@ -319,7 +356,7 @@ mod app {
         // let now = mono.now();
         let send =  Some(TxTransfer::Idle(cx.local.dma_tx_buf, dma1_tx, USART2_tx));
         (Shared {send, ticker, last_instant, gyro_read: false, accel_read:false, gyro_values, accel_values},
-         Local {led, l3gd20_driver, motor_driver, l3gd20_int2, lsm303dlhc_driver, lsm303dlhc_int1, state: 0},
+         Local {led, l3gd20_driver, motor_driver, l3gd20_int2, lsm303dlhc_driver, lsm303dlhc_int1, dcmimu_driver, state: 0},
          init::Monotonics(mono)
         )
 
@@ -368,7 +405,6 @@ mod app {
 
             // rprintln!("accel x: {}", avg_x.get());
         cx.local.lsm303dlhc_int1.clear_interrupt();
-
 
             if (*gyro_read == true) && (*accel_read == true) {
                 // will spawn after the completion of this function
@@ -466,12 +502,13 @@ mod app {
         
         let encoded: [u8; BUF_SIZE] = cobs_rs::stuff(data, 0x00);
 
-        rprintln!("{}", time_diff);
+        // rprintln!("{}", time_diff);
 
         tx_buf.copy_from_slice(&encoded[..]);
         send.replace(TxTransfer::Running(tx.write_all(tx_buf, tx_channel)));
      }
 
+    //  Transfer complete; replace TxTransfer with Idle
      #[task(binds = DMA1_CH7, shared = [send])]
     fn on_tx(ctx: on_tx::Context) {
         let send = ctx.shared.send;
@@ -481,10 +518,10 @@ mod app {
         };
         tx_channel.clear_events();
         send.replace(TxTransfer::Idle(tx_buf, tx_channel, tx));
-        
     }
 
-     #[task(local = [], shared = [last_instant, gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
+
+     #[task(local = [dcmimu_driver], shared = [last_instant, gyro_values, accel_values, accel_read, gyro_read], priority = 2)]
      fn sensor_fusion(mut cx: sensor_fusion::Context){
         
         // create temp time difference var
@@ -504,9 +541,9 @@ mod app {
 
         // converts duration to a generic, then a u32, then an f32
         let time_diff_i16: i16 = embedded_time::duration::Duration::to_generic::<u32>(time_diff, Fraction::new(1, 1000)).unwrap().integer() as i16;
-        let _time_diff_f32 = time_diff_i16 as f32;
-        // rprintln!("Time difference: {}", time_diff_f32);
+        let time_diff_f32 = time_diff_i16 as f32;
 
+        // variables for hold accel and gyro values for future BT transfer
         let mut ao = I16x3 {x: 0, y: 0, z: 0};
         let mut go = I16x3 {x: 0, y: 0, z: 0};
 
@@ -516,30 +553,53 @@ mod app {
                 *gyro_read = false;
                 *accel_read = false;
 
-              let accel_gravity:f32 = 0.00059848449; // 9.80557 Local grav, 16384 (accel converstion)
-              let gyro_degrees:f32 = 0.0175;
 
               let mut af = F32x3 {x: 0., y: 0., z: 0.};
               let mut gf = F32x3 {x: 0., y: 0., z: 0.};
-              af.x = (accel_gravity) * (accel_values.y as f32);
-              af.y = (accel_gravity) * (accel_values.x as f32);
-              af.z = (accel_gravity) * (accel_values.z as f32);
 
-              gf.x = -1. * gyro_degrees * (gyro_values.x as f32) * (3.141592 / 180.);
-              gf.y = -1. * gyro_degrees * (gyro_values.y as f32) * (3.141592 / 180.);
-              gf.z = gyro_degrees * (gyro_values.z as f32) * (3.141592 / 180.);
+                // acceletomer values with adjustment for calibration
+              af.x = (ACC_GRA) * (accel_values.x as f32);
+              af.y = (ACC_GRA) * (accel_values.y as f32);
+              af.z = (ACC_GRA) * (accel_values.z as f32);
 
-                //  rprintln!("AG: Time: {} Gyro Values: {}, Accel Values: {}", time_diff_f32, gyro_final, accel_final);
-                ao.x = accel_values.x as i16;
-                ao.y = accel_values.y as i16;
-                ao.z = accel_values.z as i16;
-                go.x = gyro_values.x as i16;
-                go.y = gyro_values.y as i16;
-                go.z = gyro_values.z as i16;
+              // Gyroscope values with adjustments for for calibration
+              gf.x = GYR_CON * (gyro_values.x as f32);
+              gf.y = GYR_CON * (gyro_values.y as f32);
+              gf.z = GYR_CON * (gyro_values.z as f32);
 
+
+              let A: Matrix3x1<f32> = Matrix3x1::new(af.x, af.y, af.z);
+              let G: Matrix3x1<f32> = Matrix3x1::new(gf.x, gf.y, gf.z);
+
+              //let _ua = K_A * R_A * A + B_A;
+              let ua = INV_R_A * INV_K_A * (A - B_A);
+              let ug = INV_R_G * INV_K_G * (G - (K_GA * ua) -  B_G);
+              af.x = ua.x;
+              af.y = ua.y;
+              af.z = ua.z;
+
+              gf.x = ug.x * (3.141592 / 180.);
+              gf.y = ug.y * (3.141592 / 180.);
+              gf.z = ug.z * (3.141592 / 180.);
+
+              rprintln!("Calibration Accel & Gyro Values: {}, {}, {}, {}, {}, {}", af.x, af.y, af.z, gf.x, gf.y, gf.z);
+
+              
+            let (_dcm, _gyro_biases) = cx.local.dcmimu_driver.update((gf.x, gf.y, gf.z), (af.x, af.y, af.z), time_diff_f32*0.001 );
+
+            // rprintln!("Position values: {}, {}, {}", dcm.roll, dcm.yaw, dcm.pitch);
+
+                //  settings values to i16 for transferring via bluetooth
+              ao.x = accel_values.x as i16;
+              ao.y = accel_values.y as i16;
+              ao.z = accel_values.z as i16;
+              go.x = gyro_values.x as i16;
+              go.y = gyro_values.y as i16;
+              go.z = gyro_values.z as i16;
 
         });
 
+        // spawn dma transfer function
         dma_send::spawn(time_diff_i16, go, ao).unwrap();
 
      }
@@ -556,7 +616,6 @@ pub struct I32x3 {
     /// Z component
     pub z: i32,
 }
-
 #[derive(Debug, Clone, Copy)]
 pub struct I16x3 {
     /// X component
